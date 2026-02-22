@@ -1,0 +1,3 @@
+[submodule "external/3D-ADS"]
+	path = external/3D-ADS
+	url = https://github.com/JJKim-617/3D-ADS.git
