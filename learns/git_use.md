@@ -97,6 +97,59 @@ Datasets/
 
 ---
 
+### 1-5. 서브모듈 추가하기
+
+기존 repo에 다른 git repo를 서브모듈로 추가하는 방법.
+외부 repo를 직접 서브모듈로 쓰기보다, **먼저 포크한 뒤 포크한 repo를 서브모듈로 등록**하는 것이 원칙.
+포크 없이 원본 repo를 바로 등록하면 수정 사항을 push할 수 없음.
+
+#### Step 0. GitHub에서 포크 먼저
+1. 원본 repo 페이지 접속 (예: `https://github.com/eliahuhorwitz/3D-ADS`)
+2. 우측 상단 `Fork` 버튼 클릭
+3. 내 계정(`JJKim-617`)으로 포크 생성 → `https://github.com/JJKim-617/3D-ADS`
+
+> 포크한 URL을 서브모듈 등록에 사용.
+
+#### Step 1. 서브모듈 등록
+```bash
+# 상위 프로젝트 디렉토리에서 실행
+cd /home/ryukimlee/3D-AD-Senior-Project
+
+# git submodule add <repo_url> <로컬_경로>
+git submodule add https://github.com/JJKim-617/3D-ADS.git external/3D-ADS
+```
+
+실행 후 자동으로 생성/수정되는 것들:
+- `external/3D-ADS/` 디렉토리 생성 및 repo clone
+- `.gitmodules` 파일 생성 (또는 내용 추가)
+
+#### Step 2. .gitmodules 확인
+```bash
+cat .gitmodules
+# 아래와 같이 등록되어 있어야 함
+# [submodule "external/3D-ADS"]
+#     path = external/3D-ADS
+#     url = https://github.com/JJKim-617/3D-ADS.git
+```
+
+#### Step 3. 서브모듈 커밋 해시 기록 (상위 repo에 반영)
+```bash
+git add .gitmodules external/3D-ADS
+git commit -m "Add 3D-ADS as submodule"
+git push origin main
+```
+
+> 서브모듈 내부에서도 `git config --local user.name/email` 설정 필요 (1-1 참고).
+
+**주의사항:**
+| 상황 | 처리 방법 |
+|---|---|
+| 이미 존재하는 디렉토리에 추가 시 | 디렉토리를 먼저 삭제하거나 비운 후 실행 |
+| Private repo를 서브모듈로 추가 시 | SSH URL 사용 권장 (`git@github.com:...`) |
+| 서브모듈 URL 변경 시 | `.gitmodules` 수정 후 `git submodule sync` 실행 |
+
+---
+
 ## 2. Git 구조
 
 ### 2-1. 전체 구조
