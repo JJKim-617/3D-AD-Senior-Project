@@ -2,6 +2,50 @@
 
 ---
 
+## 0. 협업 워크플로우 (가장 중요)
+
+### 왜 같은 서버 경로를 공유하면 안 되는가
+
+같은 리눅스 계정 + 같은 디렉토리를 두 사람이 공유하면:
+
+- **파일시스템을 공유**: 한 사람이 만든 파일/폴더는 `git add/commit` 전이라도 상대방에게 즉시 보임
+- **브랜치 상태를 공유**: `.git/HEAD` 파일이 하나이므로, 한 사람이 `git switch 브랜치` 하면 상대방 작업 환경도 바뀜
+- **작업 파일 충돌**: `git restore`, `git checkout` 등 명령어가 상대방 작업 중인 파일을 덮어쓸 수 있음
+
+브랜치를 각자 따로 만들어도, 같은 경로를 쓰는 한 위 문제는 해결되지 않는다.
+
+### 권장 워크플로우
+
+```
+[로컬 PC]                          [SSH 서버 (GPU)]
+코드 작성 (VSCode 등)               실험 실행
+git push origin 브랜치   →  git pull origin 브랜치  →  python main.py
+```
+
+- **로컬**: 코드 작성, 디버깅
+- **SSH 서버**: 학습/실험 실행 (GPU 활용)
+- **각자 계정에 별도 clone**: 서로 영향 없이 독립적으로 작업
+
+```bash
+# 각자 본인 계정 home에 clone
+git clone --recurse-submodules https://github.com/JJKim-617/3D-AD-Senior-Project.git
+```
+
+### 실제 흐름
+
+```bash
+# [로컬] 코드 작성 후
+git add .
+git commit -m "feat: ..."
+git push origin my-branch
+
+# [SSH 서버] 실험 실행
+git pull origin my-branch
+CUDA_VISIBLE_DEVICES=1 python main.py 2>&1 | tee run_log.txt
+```
+
+---
+
 ## 1. Git 사용 방법
 
 ### 1-1. 사용자 등록 (로컬 설정)
