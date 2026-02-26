@@ -208,3 +208,9 @@ __marimo__/
 
 # custom
 Datasets/
+3d_extractor_JJ/**/.venv/
+3d_extractor_JJ/**/bank/
+3d_extractor_JJ/**/dummy/
+3d_extractor_JJ/**/dinov3/weights/
+3d_extractor_JJ/**/__pycache__/
+3d_extractor_JJ/**/*.pyc
