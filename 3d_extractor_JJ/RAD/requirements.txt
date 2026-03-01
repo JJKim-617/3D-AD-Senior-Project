@@ -15,3 +15,5 @@ torchvision==0.22.0+cu128
 tqdm==4.64.1
 ptflops==0.7
 timm==0.9.12
+open3d
+tifffile
