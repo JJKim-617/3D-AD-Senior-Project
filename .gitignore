@@ -217,3 +217,4 @@ external/3D-ADS/3d_ads_venv/
 3d_extractor_JJ/**/dinov3/weights/
 3d_extractor_JJ/**/__pycache__/
 3d_extractor_JJ/**/*.pyc
+3d_extractor_JJ/
