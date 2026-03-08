@@ -41,6 +41,7 @@ from render_utils import load_and_render, get_viewpoints
 # 변경: 3D-ADS au_pro_util.calculate_au_pro — 분위수 기반 임계값, /0.3 정규화, 커스텀 trapezoid
 from au_pro_util import calculate_au_pro
 from utils import f1_score_max, get_gaussian_kernel
+from build_fpfh_bank import compute_fpfh_from_tiff
 
 warnings.filterwarnings("ignore")
 
@@ -183,6 +184,13 @@ def eval_3d(
     category: str = "",
     cache_root: str = None,
     render_workers: int = 8,
+    num_views: int = NUM_VIEWS,
+    fpfh_bank_path: str = None,
+    fpfh_alpha: float = 0.5,
+    voxel_size: float = 0.05,
+    use_concat_bank: bool = False,
+    skip_cls_topk: bool = False,
+    unified_bank: dict = None,
 ):
     """
     3D 데이터셋에 대한 패치 k-NN 이상탐지 추론 + 평가.
@@ -207,24 +215,45 @@ def eval_3d(
         os.makedirs(vis_dir, exist_ok=True)
     remain_vis = max_vis
 
-    # [3D-PATCH] 28개 뷰 뱅크를 CPU 메모리에 한 번에 프리로드
-    # 원본: for v in range(28): torch.load() 를 매 샘플마다 반복 (28 × N회 디스크 I/O)
-    # 변경: 카테고리 시작 시 1회만 로드 → CPU RAM에 float16 유지 → GPU 전송 시 float32 변환
-    #       디스크 I/O: 28×N회 → 28회로 감소 (cable_gland 기준 3024→28회)
-    print(f"  [Preload] Loading {NUM_VIEWS} view banks into CPU memory ...")
-    preloaded_banks = []
-    for v in range(NUM_VIEWS):
-        bank_path = os.path.join(bank_dir, _view_bank_name(v))
-        bank_v = torch.load(bank_path, map_location='cpu')
-        if v == 0:
-            layer_indices = bank_v["layers"]
-            num_layers    = len(layer_indices)
-        preloaded_banks.append({
-            'cls':     bank_v['cls_banks'][-1],    # [N_obj, 768] float16
-            'patches': bank_v['patch_banks'],       # 4×[N_obj, 784, 768] float16
-        })
-        del bank_v
-    print(f"  [Preload] Done. {NUM_VIEWS} banks loaded (float16 on CPU).")
+    # [3D-PATCH] 뱅크 프리로드
+    if unified_bank is not None:
+        # Unified bank: 전체 카테고리가 하나의 bank에 통합 (원본 RAD 방식)
+        layer_indices = unified_bank["layers"]
+        num_layers    = len(layer_indices)
+        preloaded_banks = [{
+            'cls':     unified_bank['cls_banks'][-1],   # [N_total, 768]
+            'patches': unified_bank['patch_banks'],      # 4×[N_total, 784, 768]
+        }]
+        num_views = 1  # unified bank은 RGB 1뷰만
+        print(f"  [Unified] Using unified bank: N={unified_bank['cls_banks'][-1].shape[0]}")
+    else:
+        # Per-category bank: 뷰별 bank 파일 로드
+        print(f"  [Preload] Loading {num_views} view banks into CPU memory ...")
+        preloaded_banks = []
+        for v in range(num_views):
+            if use_concat_bank:
+                bank_path = os.path.join(bank_dir, "concat_bank.pth")
+            else:
+                bank_path = os.path.join(bank_dir, _view_bank_name(v))
+            bank_v = torch.load(bank_path, map_location='cpu')
+            if v == 0:
+                layer_indices = bank_v["layers"]
+                num_layers    = len(layer_indices)
+            preloaded_banks.append({
+                'cls':     bank_v['cls_banks'][-1],    # [N_obj, 768] float16
+                'patches': bank_v['patch_banks'],       # 4×[N_obj, 784, 768] float16
+            })
+            del bank_v
+        print(f"  [Preload] Done. {num_views} banks loaded (float16 on CPU).")
+
+    # FPFH bank 프리로드
+    fpfh_bank = None
+    if fpfh_bank_path is not None and os.path.exists(fpfh_bank_path):
+        fpfh_data = torch.load(fpfh_bank_path, map_location='cpu')
+        fpfh_bank = fpfh_data['fpfh_patches']  # [N_obj, 784, 33] float16
+        print(f"  [FPFH] Bank loaded: {tuple(fpfh_bank.shape)}  alpha={fpfh_alpha}")
+    elif fpfh_bank_path is not None:
+        print(f"  [FPFH] Warning: bank not found: {fpfh_bank_path}, FPFH disabled")
 
     if layer_weights is None or len(layer_weights) != num_layers:
         layer_weights = [1.0 / num_layers] * num_layers
@@ -259,7 +288,7 @@ def eval_3d(
     # [3D-PATCH] 테스트 오브젝트 사전 병렬 렌더링 — inference 루프 전 캐시 준비
     # 원본: for 루프 내 순차 렌더링 (~1h/category)
     # 변경: cache_root 지정 시 병렬 사전 렌더링 → inference 루프는 캐시 로드만
-    if cache_root is not None:
+    if cache_root is not None and num_views > 1:
         _prerender_test_objects(raw_dataset, cache_root, category, color, render_workers)
 
     for obj_idx in range(N):
@@ -278,27 +307,31 @@ def eval_3d(
         rgb_pil = Image.open(rgb_path).convert('RGB')
         rgb_tensor = data_transform(rgb_pil)  # [3, 448, 448]
 
-        # [3D-PATCH] test 렌더 캐싱 — build_bank_3d.py prerender_train_objects() 와 동일한 패턴
-        # 원본: 매 inference마다 27뷰를 새로 렌더링 (CPU 병목, GPU 유휴)
-        # 변경: cache_root 지정 시 PNG 캐시 확인 → 있으면 로드, 없으면 렌더 후 저장
-        #       두 번째 실행부터 렌더링 건너뜀 (~2시간 → ~5분)
-        obj_id = os.path.splitext(os.path.basename(rgb_path))[0]
-        if cache_root is not None:
-            cache_paths = [_test_cache_path(cache_root, category, obj_id, v)
-                           for v in range(1, NUM_VIEWS)]
-            if all(os.path.exists(p) for p in cache_paths):
-                rendered_pils = [Image.open(p).convert('RGB') for p in cache_paths]
-            else:
-                rendered_pils = load_and_render(tiff_path, color=color, rgb_path=rgb_path)
-                for pil, p in zip(rendered_pils, cache_paths):
-                    os.makedirs(os.path.dirname(p), exist_ok=True)
-                    pil.save(p)
+        if num_views == 1:
+            # RGB only — 렌더링 스킵
+            imgs_28 = rgb_tensor.unsqueeze(0).to(device)  # [1, 3, 448, 448]
         else:
-            rendered_pils = load_and_render(tiff_path, color=color, rgb_path=rgb_path)  # 27 PIL Images
-        rendered_tensors = torch.stack([data_transform(p) for p in rendered_pils])  # [27, 3, 448, 448]
+            # [3D-PATCH] test 렌더 캐싱 — build_bank_3d.py prerender_train_objects() 와 동일한 패턴
+            # 원본: 매 inference마다 27뷰를 새로 렌더링 (CPU 병목, GPU 유휴)
+            # 변경: cache_root 지정 시 PNG 캐시 확인 → 있으면 로드, 없으면 렌더 후 저장
+            #       두 번째 실행부터 렌더링 건너뜀 (~2시간 → ~5분)
+            obj_id = os.path.splitext(os.path.basename(rgb_path))[0]
+            if cache_root is not None:
+                cache_paths = [_test_cache_path(cache_root, category, obj_id, v)
+                               for v in range(1, num_views)]
+                if all(os.path.exists(p) for p in cache_paths):
+                    rendered_pils = [Image.open(p).convert('RGB') for p in cache_paths]
+                else:
+                    rendered_pils = load_and_render(tiff_path, color=color, rgb_path=rgb_path)
+                    for pil, p in zip(rendered_pils, cache_paths):
+                        os.makedirs(os.path.dirname(p), exist_ok=True)
+                        pil.save(p)
+            else:
+                rendered_pils = load_and_render(tiff_path, color=color, rgb_path=rgb_path)  # 27 PIL Images
+            rendered_tensors = torch.stack([data_transform(p) for p in rendered_pils])  # [27, 3, 448, 448]
 
-        imgs_28 = torch.cat([rgb_tensor.unsqueeze(0), rendered_tensors], dim=0)  # [28, 3, 448, 448]
-        imgs_28 = imgs_28.to(device)
+            imgs_28 = torch.cat([rgb_tensor.unsqueeze(0), rendered_tensors], dim=0)  # [28, 3, 448, 448]
+            imgs_28 = imgs_28.to(device)
 
         # ----------------------------------------------------------------
         # Step B: DINOv3 일괄 forward (배치 28)
@@ -321,6 +354,14 @@ def eval_3d(
         L = patch_list[0].shape[1]   # 784
         h = w = int(L ** 0.5)        # 28
 
+        # [Concat] 테스트 FPFH 추출 → DINOv3 patch와 concat용
+        concat_fpfh_test = None
+        if use_concat_bank:
+            _fpfh_pool = torch.nn.AdaptiveAvgPool2d((h, w))
+            _fpfh_raw = compute_fpfh_from_tiff(tiff_path, voxel_size)  # [1, 33, H, W]
+            _fpfh_down = _fpfh_pool(_fpfh_raw).squeeze(0).permute(1, 2, 0)  # [28, 28, 33]
+            concat_fpfh_test = _fpfh_down.reshape(L, 33).to(device)  # [784, 33]
+
         # ----------------------------------------------------------------
         # Step C: 뷰별 k-NN + fusion
         # ----------------------------------------------------------------
@@ -330,75 +371,130 @@ def eval_3d(
         # 변경: for v in range(28) (28개 뷰 순회), 뷰별 bank 파일을 순차 로드
         anomaly_maps = []
 
-        for v in range(NUM_VIEWS):
-            # Step C-1: 프리로드된 뱅크에서 GPU로 전송
-            # [3D-PATCH] CPU 프리로드 뱅크 참조 → GPU 전송 + float32 변환
-            # 원본: torch.load() 매 샘플마다 디스크 I/O
-            # 변경: preloaded_banks[v] 에서 .to(device).float() 만 수행 (CPU→GPU 전송만)
-            cls_bank_v   = preloaded_banks[v]['cls'].to(device).float()               # [N_obj, 768]
-            patch_bank_v = [pb.to(device).float() for pb in preloaded_banks[v]['patches']]  # 4×[N_obj,784,768]
+        for v in range(num_views):
+            # Step C-1: 뱅크 로드
+            is_unified = (unified_bank is not None)
+
+            if is_unified:
+                # Unified bank: CLS만 GPU로 (작음), patch는 CPU에 유지
+                cls_bank_v = preloaded_banks[v]['cls'].to(device).float()  # [N_total, 768]
+                patch_bank_cpu = preloaded_banks[v]['patches']              # 4×[N_total, 784, 768] CPU
+                patch_bank_v = None  # GPU에 올리지 않음
+            else:
+                # Per-category bank: 전체 GPU 전송
+                cls_bank_v   = preloaded_banks[v]['cls'].to(device).float()               # [N_obj, 768]
+                patch_bank_v = [pb.to(device).float() for pb in preloaded_banks[v]['patches']]  # 4×[N_obj,784,768]
+                patch_bank_cpu = None
 
             N_obj = cls_bank_v.shape[0]
 
             # Step C-2: CLS 기반 k-NN 검색
-            cls_test_v      = cls_list[-1][v]                                  # [768]
-            cls_test_v_norm = F.normalize(cls_test_v.unsqueeze(0), dim=-1)    # [1, 768]
-            cls_bank_norm   = F.normalize(cls_bank_v, dim=-1)                  # [N_obj, 768]
-            sim_img = torch.matmul(cls_test_v_norm, cls_bank_norm.t())         # [1, N_obj]
+            if skip_cls_topk:
+                # CLS top-K 스킵: 전체 train 샘플을 이웃으로 사용
+                K = N_obj
+                neigh_indices = torch.arange(N_obj, device=device)
+            else:
+                cls_test_v      = cls_list[-1][v]                                  # [768]
+                cls_test_v_norm = F.normalize(cls_test_v.unsqueeze(0), dim=-1)    # [1, 768]
+                cls_bank_norm   = F.normalize(cls_bank_v, dim=-1)                  # [N_obj, 768]
+                sim_img = torch.matmul(cls_test_v_norm, cls_bank_norm.t())         # [1, N_obj]
 
-            # [3D-PATCH] K > N_obj 방어 — 학습 물체 수가 k_image 보다 적을 때 topk 에러 방지
-            # 원본 (RAD rad_mvtec_visa_3dadam.py:153): _, topk_idx = torch.topk(sim_img, k_image, ...)
-            # 변경: K = min(k_image, N_obj) 로 상한 제한
-            K = min(k_image, N_obj)
-            _, topk_idx = torch.topk(sim_img, K, dim=-1)   # [1, K]
-            neigh_indices = topk_idx[0]                     # [K]
+                # [3D-PATCH] K > N_obj 방어 — 학습 물체 수가 k_image 보다 적을 때 topk 에러 방지
+                K = min(k_image, N_obj)
+                _, topk_idx = torch.topk(sim_img, K, dim=-1)   # [1, K]
+                neigh_indices = topk_idx[0]                     # [K]
 
             # Step C-3: 4-layer 패치 k-NN + weighted fusion
-            # [3D-PATCH] 4-layer 루프 + weighted fusion — RAD eval 루프 구조 그대로 재사용
-            # 원본 (RAD rad_mvtec_visa_3dadam.py:166-221): for li in range(num_layers): ...
-            # 변경: q_feat = patch_list[li][v] 로 view 차원 v 인덱싱 추가
             scores_per_layer = []
 
             for li in range(num_layers):
-                # [3D-PATCH] view 인덱스 v 추가 — 28뷰 중 현재 뷰의 patch feature 선택
-                # 원본 (RAD rad_mvtec_visa_3dadam.py:170): q_feat = patches_x_l[b]
-                # 변경: batch 차원(b) 대신 view 차원(v) 으로 인덱싱
                 q_feat = patch_list[li][v]                   # [784, 768]
 
-                # [3D-PATCH] list 원소를 텐서 인덱싱으로 가져옴 — Bug #1 수정
-                # 원본 (계획 pseudocode 오류): patch_bank_v[topk_idx] — list에 tensor 인덱스 불가
-                # 변경: patch_bank_v[li] 로 레이어 분리 후 bank_l[neigh_indices] 로 인덱싱
-                bank_l     = patch_bank_v[li]                # [N_obj, 784, 768]
-                neigh_feat = bank_l[neigh_indices]           # [K, 784, 768]
+                # [Concat] DINOv3 patch + FPFH concat → [784, 801]
+                if concat_fpfh_test is not None:
+                    q_feat = torch.cat([q_feat, concat_fpfh_test], dim=-1)
+
+                # Patch bank 로드: unified면 CPU에서 top-K만 선별 후 GPU 전송
+                if is_unified:
+                    # CPU에서 인덱싱 → 선별된 K개만 GPU 전송 (VRAM 절약)
+                    neigh_idx_cpu = neigh_indices.cpu()
+                    neigh_feat = patch_bank_cpu[li][neigh_idx_cpu].to(device).float()  # [K, 784, 768]
+                else:
+                    bank_l = patch_bank_v[li]                # [N_obj, 784, 768]
+                    if skip_cls_topk:
+                        neigh_feat = bank_l                  # 복사 없이 직접 참조
+                    else:
+                        neigh_feat = bank_l[neigh_indices]   # [K, 784, 768]
 
                 q_feat     = F.normalize(q_feat,     dim=-1)
                 neigh_feat = F.normalize(neigh_feat, dim=-1)
 
                 if use_positional_bank:
                     # [3D-PATCH] 벡터화 positional k-NN — Python 784회 루프 제거
-                    # 원본: for j in range(L): 개별 matmul (87,808회/샘플)
-                    # 변경: 배치 gather + bmm 으로 한 번에 계산 (~50× 속도 향상)
-                    gathered = neigh_feat[:, pos_padded_idx, :]             # [K, L, max_neigh, 768]
-                    gathered = gathered.permute(1, 0, 2, 3)                 # [L, K, max_neigh, 768]
-                    gathered = gathered.reshape(L, K * pos_max_neigh, 768)  # [L, K*max_neigh, 768]
+                    # K가 클 때 (skip_cls_topk) OOM 방지를 위해 chunk 단위 처리
+                    D = neigh_feat.shape[-1]                                # 768 or 801 (concat)
+                    CHUNK = 48  # 한 번에 처리할 이웃 수
+                    if K <= CHUNK:
+                        # 기존 방식: 한 번에 전체 처리
+                        gathered = neigh_feat[:, pos_padded_idx, :]             # [K, L, max_neigh, D]
+                        gathered = gathered.permute(1, 0, 2, 3)                 # [L, K, max_neigh, D]
+                        gathered = gathered.reshape(L, K * pos_max_neigh, D)    # [L, K*max_neigh, D]
 
-                    sim = torch.bmm(
-                        q_feat.unsqueeze(1),           # [L, 1, 768]
-                        gathered.transpose(1, 2),      # [L, 768, K*max_neigh]
-                    ).squeeze(1)                       # [L, K*max_neigh]
+                        sim = torch.bmm(
+                            q_feat.unsqueeze(1),           # [L, 1, D]
+                            gathered.transpose(1, 2),      # [L, D, K*max_neigh]
+                        ).squeeze(1)                       # [L, K*max_neigh]
 
-                    # 에지/코너 패치의 패딩된 이웃 마스킹 (9개 미만)
-                    mask_exp = pos_neigh_mask.unsqueeze(1).expand(
-                        -1, K, -1
-                    ).reshape(L, K * pos_max_neigh)
-                    sim[~mask_exp] = -1.0
+                        mask_exp = pos_neigh_mask.unsqueeze(1).expand(
+                            -1, K, -1
+                        ).reshape(L, K * pos_max_neigh)
+                        sim[~mask_exp] = -1.0
 
-                    nn_sim = sim.max(dim=-1)[0]        # [L]
+                        nn_sim = sim.max(dim=-1)[0]        # [L]
+                    else:
+                        # Chunk 처리: VRAM 절약
+                        nn_sim = torch.full((L,), -1.0, device=device)
+                        q_unsq = q_feat.unsqueeze(1)       # [L, 1, D]
+                        for c_start in range(0, K, CHUNK):
+                            c_end = min(c_start + CHUNK, K)
+                            c_k = c_end - c_start
+                            chunk_feat = neigh_feat[c_start:c_end]              # [c_k, L, D]
+                            gathered = chunk_feat[:, pos_padded_idx, :]         # [c_k, L, max_neigh, D]
+                            gathered = gathered.permute(1, 0, 2, 3)             # [L, c_k, max_neigh, D]
+                            gathered = gathered.reshape(L, c_k * pos_max_neigh, D)
+
+                            sim_chunk = torch.bmm(
+                                q_unsq,                        # [L, 1, D]
+                                gathered.transpose(1, 2),      # [L, D, c_k*max_neigh]
+                            ).squeeze(1)                       # [L, c_k*max_neigh]
+
+                            mask_chunk = pos_neigh_mask.unsqueeze(1).expand(
+                                -1, c_k, -1
+                            ).reshape(L, c_k * pos_max_neigh)
+                            sim_chunk[~mask_chunk] = -1.0
+
+                            chunk_max = sim_chunk.max(dim=-1)[0]    # [L]
+                            nn_sim = torch.max(nn_sim, chunk_max)
+                            del gathered, sim_chunk, chunk_feat
+
                     patch_score_l = 1.0 - nn_sim
                 else:
-                    bank_local = neigh_feat.reshape(-1, neigh_feat.shape[-1])  # [K*L, 768]
-                    sim_p      = torch.matmul(q_feat, bank_local.t())          # [L, K*L]
-                    nn_sim, _  = sim_p.max(dim=-1)                             # [L]
+                    # non-positional도 chunk 처리
+                    D = neigh_feat.shape[-1]
+                    CHUNK = 48
+                    if K <= CHUNK:
+                        bank_local = neigh_feat.reshape(-1, D)          # [K*L, D]
+                        sim_p      = torch.matmul(q_feat, bank_local.t())  # [L, K*L]
+                        nn_sim, _  = sim_p.max(dim=-1)                     # [L]
+                    else:
+                        nn_sim = torch.full((L,), -1.0, device=device)
+                        for c_start in range(0, K, CHUNK):
+                            c_end = min(c_start + CHUNK, K)
+                            chunk_local = neigh_feat[c_start:c_end].reshape(-1, D)  # [c_k*L, D]
+                            sim_chunk = torch.matmul(q_feat, chunk_local.t())       # [L, c_k*L]
+                            chunk_max, _ = sim_chunk.max(dim=-1)
+                            nn_sim = torch.max(nn_sim, chunk_max)
+                            del chunk_local, sim_chunk
                     patch_score_l = 1.0 - nn_sim
 
                 scores_per_layer.append(patch_score_l)
@@ -413,7 +509,9 @@ def eval_3d(
             # [3D-PATCH] 뷰 v 뱅크 GPU 메모리 해제 — GC에 위임
             # 원본: del + torch.cuda.empty_cache() (28회 CUDA 동기화 강제)
             # 변경: del 만 수행, empty_cache 제거 → CUDA 동기화 오버헤드 제거
-            del cls_bank_v, patch_bank_v
+            del cls_bank_v
+            if patch_bank_v is not None:
+                del patch_bank_v
 
         # ----------------------------------------------------------------
         # Step D: 28뷰 max fusion → upsample → GT 정렬
@@ -422,7 +520,48 @@ def eval_3d(
         # [3D-PATCH] 28뷰 max fusion — RAD에는 없는 다시점 fusion 단계
         # 원본 (RAD): 단일 뷰 anomaly_map 그대로 사용
         # 변경: 28개 anomaly_map 중 최대값으로 fusion → 최악의 뷰를 이상 점수로 채택
-        final_map = torch.stack(anomaly_maps).max(dim=0).values   # [784]
+        rgb_final_map = torch.stack(anomaly_maps).max(dim=0).values   # [784]
+
+        # ----------------------------------------------------------------
+        # Step D-2: FPFH score fusion (optional)
+        # ----------------------------------------------------------------
+        if fpfh_bank is not None:
+            # FPFH 추출: TIFF → [1, 33, H, W] → pool → [784, 33]
+            fpfh_pool = torch.nn.AdaptiveAvgPool2d((h, w))
+            fpfh_map_raw = compute_fpfh_from_tiff(tiff_path, voxel_size)  # [1, 33, H, W]
+            fpfh_down = fpfh_pool(fpfh_map_raw).squeeze(0).permute(1, 2, 0)  # [28, 28, 33]
+            fpfh_test = fpfh_down.reshape(L, 33).to(device)  # [784, 33]
+
+            # FPFH bank → GPU (view 0의 top-K 이웃 인덱스 재사용)
+            fpfh_bank_gpu = fpfh_bank.to(device).float()  # [N_obj, 784, 33]
+            fpfh_neigh = fpfh_bank_gpu[neigh_indices]  # [K, 784, 33]
+
+            # Cosine similarity k-NN
+            q_fpfh = F.normalize(fpfh_test, dim=-1)  # [784, 33]
+            n_fpfh = F.normalize(fpfh_neigh, dim=-1)  # [K, 784, 33]
+
+            if use_positional_bank:
+                gathered_f = n_fpfh[:, pos_padded_idx, :]  # [K, L, max_neigh, 33]
+                gathered_f = gathered_f.permute(1, 0, 2, 3).reshape(L, K * pos_max_neigh, 33)
+                sim_f = torch.bmm(
+                    q_fpfh.unsqueeze(1),
+                    gathered_f.transpose(1, 2),
+                ).squeeze(1)  # [L, K*max_neigh]
+                mask_f = pos_neigh_mask.unsqueeze(1).expand(-1, K, -1).reshape(L, K * pos_max_neigh)
+                sim_f[~mask_f] = -1.0
+                fpfh_score = 1.0 - sim_f.max(dim=-1)[0]  # [784]
+            else:
+                fpfh_local = n_fpfh.reshape(-1, 33)  # [K*784, 33]
+                sim_f = torch.matmul(q_fpfh, fpfh_local.t())  # [784, K*784]
+                fpfh_score = 1.0 - sim_f.max(dim=-1)[0]  # [784]
+
+            del fpfh_bank_gpu, fpfh_neigh
+
+            # Raw score fusion (both are cosine distance, same [0,1] scale)
+            final_map = (1.0 - fpfh_alpha) * rgb_final_map + fpfh_alpha * fpfh_score
+        else:
+            final_map = rgb_final_map
+
         patch_map = final_map.view(1, 1, h, w)                    # [1, 1, 28, 28]
 
         anomaly_map_up = F.interpolate(
@@ -582,6 +721,24 @@ def main():
                         help='사용할 디바이스 (예: cuda:0, cuda:1, cpu). 미지정 시 자동 선택')
     parser.add_argument('--render_workers', type=int, default=8,
                         help='병렬 테스트 렌더링 워커 수 (기본: 8, GPU당 16~28 권장)')
+    parser.add_argument('--num_views', type=int, default=28,
+                        help='사용할 뷰 수 (1=RGB only, 28=전체)')
+
+    # FPFH score-level fusion
+    parser.add_argument('--fpfh_alpha', type=float, default=0.0,
+                        help='FPFH fusion weight (0.0=RGB only, 0.5=equal, 1.0=FPFH only)')
+    parser.add_argument('--voxel_size', type=float, default=0.05,
+                        help='FPFH voxel size for normal/feature radius')
+
+    # 3D-ADS style feature-level concat
+    parser.add_argument('--use_concat_bank', action='store_true',
+                        help='Use RGB+FPFH concat bank (3D-ADS style, 801-dim)')
+    parser.add_argument('--skip_cls_topk', action='store_true',
+                        help='Skip CLS top-K filtering, use all train samples as neighbors')
+
+    # Unified bank (원본 RAD 방식: 전체 카테고리 → 1 bank)
+    parser.add_argument('--unified_bank_path', type=str, default=None,
+                        help='통합 bank .pth 경로 (지정 시 per-category bank 대신 사용)')
 
     args = parser.parse_args()
 
@@ -601,6 +758,8 @@ def main():
     print_fn(f"device: {device}")
     print_fn(f"use_positional_bank={args.use_positional_bank}  pos_radius={args.pos_radius}")
     print_fn(f"color={args.color}  k_image={args.k_image}")
+    print_fn(f"fpfh_alpha={args.fpfh_alpha}  voxel_size={args.voxel_size}  use_concat_bank={args.use_concat_bank}  skip_cls_topk={args.skip_cls_topk}")
+    print_fn(f"unified_bank_path={args.unified_bank_path}")
     print_fn(f"item_list={args.item_list}")
 
     data_transform, gt_transform = get_data_transforms(args.image_size, args.crop_size)
@@ -614,6 +773,14 @@ def main():
     for p in encoder.parameters():
         p.requires_grad = False
     encoder.eval()
+
+    # Unified bank 로드 (전체 카테고리 1회 로드)
+    unified_bank = None
+    if args.unified_bank_path is not None:
+        print_fn(f"[Unified] Loading unified bank: {args.unified_bank_path}")
+        unified_bank = torch.load(args.unified_bank_path, map_location='cpu')
+        N_total = unified_bank['cls_banks'][-1].shape[0]
+        print_fn(f"[Unified] Loaded: N_total={N_total}, layers={unified_bank['layers']}")
 
     # 카테고리별 평가
     auroc_sp_list, ap_sp_list, f1_sp_list = [], [], []
@@ -630,17 +797,23 @@ def main():
             print_fn(f"  Warning: no test objects found for '{category}', skipping.")
             continue
 
-        # [3D-PATCH] 카테고리별 bank_dir 경로 구성
-        # 원본 (RAD): args.bank_path (단일 파일)
-        # 변경: args.bank_dir/<category>/ 하위의 bank_view_vv.pth 파일들
-        bank_dir_cat = os.path.join(args.bank_dir, category)
-        if not os.path.isdir(bank_dir_cat):
-            print_fn(f"  Error: bank_dir not found: {bank_dir_cat}  (run build_bank_3d.py first)")
-            continue
+        # bank 경로 구성
+        bank_dir_cat = None
+        if unified_bank is None:
+            # Per-category bank
+            bank_dir_cat = os.path.join(args.bank_dir, category)
+            if not os.path.isdir(bank_dir_cat):
+                print_fn(f"  Error: bank_dir not found: {bank_dir_cat}  (run build_bank_3d.py first)")
+                continue
 
         vis_dir = os.path.join(
             args.save_dir, args.save_name, "test_vis", category
         )
+
+        # FPFH bank 경로 구성 (score fusion: alpha > 0, concat: use_concat_bank)
+        fpfh_bank_path = None
+        if args.fpfh_alpha > 0 and not args.use_concat_bank and bank_dir_cat is not None:
+            fpfh_bank_path = os.path.join(bank_dir_cat, "fpfh_bank.pth")
 
         results = eval_3d(
             encoder           = encoder,
@@ -663,6 +836,13 @@ def main():
             category          = category,
             cache_root        = args.cache_dir,
             render_workers    = args.render_workers,
+            num_views         = args.num_views,
+            fpfh_bank_path    = fpfh_bank_path,
+            fpfh_alpha        = args.fpfh_alpha,
+            voxel_size        = args.voxel_size,
+            use_concat_bank   = args.use_concat_bank,
+            skip_cls_topk     = args.skip_cls_topk,
+            unified_bank      = unified_bank,
         )
 
         auroc_sp, ap_sp, f1_sp, auroc_px, ap_px, f1_px, aupro_px = results

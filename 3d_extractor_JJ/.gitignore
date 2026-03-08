@@ -1,0 +1,21 @@
+# Virtual environment
+RAD/.venv/
+
+# Model weights
+RAD/dinov3/weights/
+
+# Memory banks
+RAD/bank/
+bank_views/
+
+# Cache & bytecode
+__pycache__/
+*.pyc
+
+# Saved results (large outputs)
+RAD/saved_results_3d/
+
+# OS / IDE
+.DS_Store
+.claude/
+CLAUDE.md
