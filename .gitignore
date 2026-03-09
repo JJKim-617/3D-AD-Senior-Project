@@ -209,6 +209,8 @@ __marimo__/
 # custom
 Datasets/
 external/3D-ADS/3d_ads_venv/
+3d_extractor_JJ/RAD
+3d_extractor_JJ/saved_results_3d
 3d_extractor_JJ/**/.venv/
 3d_extractor_JJ/**/bank/
 3d_extractor_JJ/**/bank_3d/
@@ -217,4 +219,3 @@ external/3D-ADS/3d_ads_venv/
 3d_extractor_JJ/**/dinov3/weights/
 3d_extractor_JJ/**/__pycache__/
 3d_extractor_JJ/**/*.pyc
-3d_extractor_JJ/
