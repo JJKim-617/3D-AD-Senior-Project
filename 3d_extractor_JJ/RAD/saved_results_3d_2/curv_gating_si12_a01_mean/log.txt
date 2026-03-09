@@ -1,0 +1,68 @@
+device: cuda:0
+use_positional_bank=False  pos_radius=1
+color=rgb  k_image=48
+fpfh_alpha=0.0  voxel_size=0.05  use_concat_bank=False  skip_cls_topk=False
+unified_bank_path=None
+item_list=['bagel', 'cable_gland', 'carrot', 'cookie', 'dowel', 'foam', 'peach', 'potato', 'rope', 'tire']
+
+============================================================
+[Eval3D] Category: bagel
+MVTec3DRawDataset(category='bagel', phase='test', normal=22, anomaly=88)
+  [Curvature] Loaded: ./bank_views/bagel/SI-12_bank.pth
+bagel: I-AUROC:0.9737, I-AP:0.9934, I-F1:0.9667, P-AUROC:0.9950, P-AP:0.7648, P-F1:0.7148, P-AUPRO:0.9765
+
+============================================================
+[Eval3D] Category: cable_gland
+MVTec3DRawDataset(category='cable_gland', phase='test', normal=21, anomaly=87)
+  [Curvature] Loaded: ./bank_views/cable_gland/SI-12_bank.pth
+cable_gland: I-AUROC:0.9918, I-AP:0.9982, I-F1:0.9885, P-AUROC:0.9969, P-AP:0.6366, P-F1:0.6415, P-AUPRO:0.9801
+
+============================================================
+[Eval3D] Category: carrot
+MVTec3DRawDataset(category='carrot', phase='test', normal=27, anomaly=132)
+  [Curvature] Loaded: ./bank_views/carrot/SI-12_bank.pth
+carrot: I-AUROC:0.9812, I-AP:0.9963, I-F1:0.9699, P-AUROC:0.9984, P-AP:0.6222, P-F1:0.6235, P-AUPRO:0.9821
+
+============================================================
+[Eval3D] Category: cookie
+MVTec3DRawDataset(category='cookie', phase='test', normal=28, anomaly=103)
+  [Curvature] Loaded: ./bank_views/cookie/SI-12_bank.pth
+cookie: I-AUROC:0.8960, I-AP:0.9726, I-F1:0.9018, P-AUROC:0.9796, P-AP:0.7306, P-F1:0.6851, P-AUPRO:0.9413
+
+============================================================
+[Eval3D] Category: dowel
+MVTec3DRawDataset(category='dowel', phase='test', normal=26, anomaly=104)
+  [Curvature] Loaded: ./bank_views/dowel/SI-12_bank.pth
+dowel: I-AUROC:0.9704, I-AP:0.9929, I-F1:0.9665, P-AUROC:0.9971, P-AP:0.6437, P-F1:0.6098, P-AUPRO:0.9770
+
+============================================================
+[Eval3D] Category: foam
+MVTec3DRawDataset(category='foam', phase='test', normal=20, anomaly=80)
+  [Curvature] Loaded: ./bank_views/foam/SI-12_bank.pth
+foam: I-AUROC:0.8900, I-AP:0.9731, I-F1:0.9161, P-AUROC:0.9473, P-AP:0.4388, P-F1:0.4703, P-AUPRO:0.8485
+
+============================================================
+[Eval3D] Category: peach
+MVTec3DRawDataset(category='peach', phase='test', normal=26, anomaly=106)
+  [Curvature] Loaded: ./bank_views/peach/SI-12_bank.pth
+peach: I-AUROC:0.9931, I-AP:0.9983, I-F1:0.9813, P-AUROC:0.9988, P-AP:0.8041, P-F1:0.7426, P-AUPRO:0.9826
+
+============================================================
+[Eval3D] Category: potato
+MVTec3DRawDataset(category='potato', phase='test', normal=22, anomaly=92)
+  [Curvature] Loaded: ./bank_views/potato/SI-12_bank.pth
+potato: I-AUROC:0.8108, I-AP:0.9484, I-F1:0.9128, P-AUROC:0.9980, P-AP:0.6012, P-F1:0.5809, P-AUPRO:0.9812
+
+============================================================
+[Eval3D] Category: rope
+MVTec3DRawDataset(category='rope', phase='test', normal=32, anomaly=69)
+  [Curvature] Loaded: ./bank_views/rope/SI-12_bank.pth
+rope: I-AUROC:0.9905, I-AP:0.9962, I-F1:0.9781, P-AUROC:0.9955, P-AP:0.5942, P-F1:0.5857, P-AUPRO:0.9765
+
+============================================================
+[Eval3D] Category: tire
+MVTec3DRawDataset(category='tire', phase='test', normal=25, anomaly=87)
+  [Curvature] Loaded: ./bank_views/tire/SI-12_bank.pth
+tire: I-AUROC:0.9246, I-AP:0.9802, I-F1:0.9213, P-AUROC:0.9966, P-AP:0.5849, P-F1:0.5549, P-AUPRO:0.9738
+
+Mean: I-AUROC:0.9422, I-AP:0.9850, I-F1:0.9503, P-AUROC:0.9903, P-AP:0.6421, P-F1:0.6209, P-AUPRO:0.9620

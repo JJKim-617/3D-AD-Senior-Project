@@ -191,6 +191,13 @@ def eval_3d(
     use_concat_bank: bool = False,
     skip_cls_topk: bool = False,
     unified_bank: dict = None,
+    curv_prior: dict = None,
+    curv_alpha: float = 0.3,
+    curv_gamma: float = 1.0,
+    curv_fusion: str = "dampening",
+    curv_percentile: float = 0,
+    curv_points_bank: dict = None,
+    curv_workers: int = 2,
 ):
     """
     3D 데이터셋에 대한 패치 k-NN 이상탐지 추론 + 평가.
@@ -213,7 +220,8 @@ def eval_3d(
 
     if vis_dir is not None:
         os.makedirs(vis_dir, exist_ok=True)
-    remain_vis = max_vis
+    from collections import defaultdict
+    vis_count_per_type = defaultdict(int)  # defect_type → 저장 카운트
 
     # [3D-PATCH] 뱅크 프리로드
     if unified_bank is not None:
@@ -290,6 +298,87 @@ def eval_3d(
     # 변경: cache_root 지정 시 병렬 사전 렌더링 → inference 루프는 캐시 로드만
     if cache_root is not None and num_views > 1:
         _prerender_test_objects(raw_dataset, cache_root, category, color, render_workers)
+
+    # [3D-PATCH] Curvature precompute (병렬)
+    curv_descs = {}
+    curv_amaps = {}  # pixel_gating: tiff_path → [H, W] anomaly map
+    if curv_prior is not None or curv_points_bank is not None:
+        from functools import partial as _partial
+        import multiprocessing as _mp
+
+        _tiff_paths = [raw_dataset.tiff_paths[i] for i in range(N)]
+        _num_curv_workers = min(curv_workers, N)
+
+        if curv_fusion == "pixel_gating" and curv_points_bank is not None:
+            # Pixel-level curvature anomaly map precompute
+            from curvature_utils import compute_curvature_anomaly_map_from_tiff
+
+            # Gaussian stats: use precomputed if available, else compute on-the-fly
+            if "pt_mu" in curv_points_bank:
+                _pt_mu = curv_points_bank["pt_mu"].numpy()
+                _pt_sigma_inv = np.linalg.inv(curv_points_bank["pt_sigma"].numpy())
+                _pt_min = curv_points_bank["pt_min"]
+                _pt_max = curv_points_bank["pt_max"]
+            else:
+                # On-the-fly: compute from point_features
+                _all_pts = np.concatenate(
+                    [pf.numpy() for pf in curv_points_bank["point_features"] if len(pf) > 0],
+                    axis=0,
+                )
+                _pt_mu = np.mean(_all_pts, axis=0).astype(np.float64)
+                _reg = 1e-6 * np.eye(_all_pts.shape[1])
+                _pt_sigma = np.cov(_all_pts, rowvar=False).astype(np.float64) + _reg
+                _pt_sigma_inv = np.linalg.inv(_pt_sigma)
+                # Normalization stats (p1/p99)
+                if len(_all_pts) > 500_000:
+                    _rng = np.random.default_rng(42)
+                    _sub = _all_pts[_rng.choice(len(_all_pts), 500_000, replace=False)]
+                else:
+                    _sub = _all_pts
+                _diff = _sub.astype(np.float64) - _pt_mu
+                _maha = np.sqrt(np.clip(np.sum(_diff @ _pt_sigma_inv * _diff, axis=1), 0, None))
+                _pt_min = float(np.percentile(_maha, 1))
+                _pt_max = float(np.percentile(_maha, 99))
+                print(f"  [Curvature] On-the-fly Gaussian: {len(_all_pts)} pts, "
+                      f"Maha p1-p99: [{_pt_min:.4f}, {_pt_max:.4f}]")
+
+            _curv_map_fn = _partial(
+                compute_curvature_anomaly_map_from_tiff,
+                pt_mu=_pt_mu, pt_sigma_inv=_pt_sigma_inv,
+                pt_min=_pt_min, pt_max=_pt_max,
+            )
+
+            if _num_curv_workers > 1:
+                print(f"  [Curvature] Precomputing {N} pixel anomaly maps (workers={_num_curv_workers}) ...")
+                _ctx = _mp.get_context("spawn")
+                with _ctx.Pool(_num_curv_workers) as _pool:
+                    _results = list(_pool.map(_curv_map_fn, _tiff_paths))
+                for _i, _amap in enumerate(_results):
+                    curv_amaps[_tiff_paths[_i]] = _amap
+            else:
+                print(f"  [Curvature] Precomputing {N} pixel anomaly maps (sequential) ...")
+                for _i in range(N):
+                    curv_amaps[_tiff_paths[_i]] = _curv_map_fn(_tiff_paths[_i])
+            print(f"  [Curvature] Pixel map precompute done.")
+
+        elif curv_prior is not None:
+            # Sample-level descriptor precompute
+            from curvature_utils import compute_curvature_descriptor_from_tiff
+
+            _curv_fn = _partial(compute_curvature_descriptor_from_tiff, percentile=curv_percentile)
+
+            if _num_curv_workers > 1:
+                print(f"  [Curvature] Precomputing {N} descriptors (workers={_num_curv_workers}, pctl={curv_percentile}) ...")
+                _ctx = _mp.get_context("spawn")
+                with _ctx.Pool(_num_curv_workers) as _pool:
+                    _results = list(_pool.map(_curv_fn, _tiff_paths))
+                for _i, _desc in enumerate(_results):
+                    curv_descs[_tiff_paths[_i]] = _desc
+            else:
+                print(f"  [Curvature] Precomputing {N} descriptors (sequential, pctl={curv_percentile}) ...")
+                for _i in range(N):
+                    curv_descs[_tiff_paths[_i]] = _curv_fn(_tiff_paths[_i])
+            print(f"  [Curvature] Precompute done.")
 
     for obj_idx in range(N):
         rgb_path  = raw_dataset.rgb_paths[obj_idx]
@@ -562,6 +651,39 @@ def eval_3d(
         else:
             final_map = rgb_final_map
 
+        # ----------------------------------------------------------------
+        # Step D-3: Curvature prior fusion (optional)
+        # ----------------------------------------------------------------
+        if curv_prior is not None and curv_fusion != "pixel_gating":
+            from scipy.spatial.distance import mahalanobis as _mahalanobis
+
+            mu_curv = curv_prior["mu"].numpy()
+            sigma_inv = curv_prior["sigma_inv"]
+            c_min = curv_prior["curv_min"]
+            c_max = curv_prior["curv_max"]
+            nm = curv_prior.get("_norm_mean")
+            ns = curv_prior.get("_norm_std")
+
+            v_test = curv_descs[tiff_path]
+            if nm is not None:
+                v_test = (v_test - nm) / ns
+            s_curv_raw = _mahalanobis(v_test, mu_curv, sigma_inv)
+
+            # min-max normalization + clamp
+            s_curv_norm = (s_curv_raw - c_min) / (c_max - c_min + 1e-8)
+            s_curv_norm = float(np.clip(s_curv_norm, 0.0, 1.0))
+
+            if curv_fusion == "dampening":
+                w_curv = s_curv_norm ** curv_gamma
+                multiplier = curv_alpha + (1.0 - curv_alpha) * w_curv
+                final_map = final_map * multiplier
+            elif curv_fusion == "gating":
+                # s_curv ≈ 0 (typical) → s_RAD 유지
+                # s_curv > 0 (atypical) → s_RAD 증폭
+                final_map = final_map * (1.0 + curv_alpha * s_curv_norm)
+            elif curv_fusion == "additive":
+                final_map = final_map + curv_alpha * s_curv_norm
+
         patch_map = final_map.view(1, 1, h, w)                    # [1, 1, 28, 28]
 
         anomaly_map_up = F.interpolate(
@@ -583,6 +705,23 @@ def eval_3d(
                 mode='nearest',
             ).squeeze(0)                                    # [1, resize_mask, resize_mask]
             gt_tensor = (gt_tensor > 0.5).bool().unsqueeze(0)  # [1, 1, resize_mask, resize_mask]
+
+        # ----------------------------------------------------------------
+        # Step D-4: Pixel-level curvature gating (optional, curv_fusion="pixel_gating")
+        # ----------------------------------------------------------------
+        if curv_fusion == "pixel_gating" and tiff_path in curv_amaps:
+            curv_map_hw = curv_amaps[tiff_path]  # [H_org, W_org] numpy
+            curv_map_t = torch.from_numpy(curv_map_hw).float().unsqueeze(0).unsqueeze(0)  # [1,1,H,W]
+            curv_map_resized = F.interpolate(
+                curv_map_t, size=resize_mask, mode='bilinear', align_corners=False,
+            ).to(anomaly_map_up.device)  # [1, 1, resize_mask, resize_mask]
+            # Multiplicative gating: s_final = s_RAD * (1 + λ * s_curv_map)
+            anomaly_map_up = anomaly_map_up * (1.0 + curv_alpha * curv_map_resized)
+            # Min-max re-normalization
+            a_min = anomaly_map_up.min()
+            a_max = anomaly_map_up.max()
+            if a_max - a_min > 1e-8:
+                anomaly_map_up = (anomaly_map_up - a_min) / (a_max - a_min)
 
         anomaly_map_up = gaussian_kernel(anomaly_map_up)   # Gaussian smoothing
 
@@ -606,7 +745,11 @@ def eval_3d(
         # Step F: 시각화 (선택)
         # ----------------------------------------------------------------
 
-        if vis_dir is not None and remain_vis > 0:
+        defect_type = raw_dataset.types[obj_idx]
+        if vis_dir is not None and vis_count_per_type[defect_type] < max_vis:
+            defect_vis_dir = os.path.join(vis_dir, defect_type)
+            os.makedirs(defect_vis_dir, exist_ok=True)
+
             inp_np   = np.array(Image.open(rgb_path).convert('RGB').resize((resize_mask, resize_mask)))
             amap_np  = anomaly_map_up[0, 0].detach().cpu().numpy()
             gt_np    = gt_tensor[0, 0].cpu().numpy().astype(np.float32)
@@ -620,9 +763,9 @@ def eval_3d(
 
             plt.tight_layout()
             stem = os.path.splitext(os.path.basename(rgb_path))[0]
-            plt.savefig(os.path.join(vis_dir, f"vis_{stem}.png"), dpi=150)
+            plt.savefig(os.path.join(defect_vis_dir, f"vis_{stem}.png"), dpi=150)
             plt.close()
-            remain_vis -= 1
+            vis_count_per_type[defect_type] += 1
 
         print(f"  [{obj_idx + 1}/{N}] label={label}  sp_score={sp_score.item():.4f}")
 
@@ -695,7 +838,8 @@ def main():
                         help='이미지 레벨 k-NN 이웃 수 (3D-ADAM 기본값 48)')
     parser.add_argument('--resize_mask', type=int,   default=256)
     parser.add_argument('--max_ratio',   type=float, default=0.01)
-    parser.add_argument('--vis_max',     type=int,   default=8)
+    parser.add_argument('--vis_max',     type=int,   default=5,
+                        help='카테고리별 시각화 저장 장수 (default: 5)')
 
     parser.add_argument('--use_positional_bank', action='store_true')
     parser.add_argument('--pos_radius', type=int, default=1)
@@ -739,6 +883,23 @@ def main():
     # Unified bank (원본 RAD 방식: 전체 카테고리 → 1 bank)
     parser.add_argument('--unified_bank_path', type=str, default=None,
                         help='통합 bank .pth 경로 (지정 시 per-category bank 대신 사용)')
+
+    # Curvature prior fusion
+    parser.add_argument('--use_curvature_prior', action='store_true',
+                        help='curvature prior dampening fusion 활성화')
+    parser.add_argument('--curv_alpha', type=float, default=0.3,
+                        help='dampening 최소 보존 비율 (0=완전 억제, 1=no dampening)')
+    parser.add_argument('--curv_gamma', type=float, default=1.0,
+                        help='w_curv = s_curv^γ 곡선 제어 (>1: conservative, <1: sensitive)')
+    parser.add_argument('--curv_fusion', type=str, default='dampening',
+                        choices=['dampening', 'gating', 'additive', 'pixel_gating'],
+                        help='curvature prior fusion 방식')
+    parser.add_argument('--curv_normalize', action='store_true',
+                        help='SI-12 descriptor per-dim z-score normalization')
+    parser.add_argument('--curv_percentile', type=float, default=0,
+                        help='SI-12 aggregation percentile (0=mean, 90=p90)')
+    parser.add_argument('--curv_workers', type=int, default=2,
+                        help='curvature descriptor 병렬 worker 수')
 
     args = parser.parse_args()
 
@@ -815,6 +976,55 @@ def main():
         if args.fpfh_alpha > 0 and not args.use_concat_bank and bank_dir_cat is not None:
             fpfh_bank_path = os.path.join(bank_dir_cat, "fpfh_bank.pth")
 
+        # Curvature prior 로드
+        curv_prior = None
+        if args.use_curvature_prior and bank_dir_cat is not None:
+            # Bank 파일 선택: --curv_percentile 에 따라 mean/p90 bank
+            if args.curv_percentile > 0:
+                bank_fname = f"SI-12_p{int(args.curv_percentile)}_bank.pth"
+            else:
+                bank_fname = "SI-12_mean_bank.pth"
+            curv_prior_path = os.path.join(bank_dir_cat, bank_fname)
+            # fallback: 기존 SI-12_bank.pth
+            if not os.path.exists(curv_prior_path):
+                curv_prior_path = os.path.join(bank_dir_cat, "SI-12_bank.pth")
+            if os.path.exists(curv_prior_path):
+                curv_prior = torch.load(curv_prior_path, map_location='cpu')
+                # On-the-fly z-score normalization (--curv_normalize)
+                if args.curv_normalize and "descriptors" in curv_prior:
+                    from scipy.spatial.distance import mahalanobis as _maha
+                    descs_raw = curv_prior["descriptors"].numpy()
+                    nm = np.mean(descs_raw, axis=0)
+                    ns = np.std(descs_raw, axis=0)
+                    ns[ns < 1e-10] = 1.0
+                    descs_n = (descs_raw - nm) / ns
+                    mu_n = np.mean(descs_n, axis=0)
+                    sig_n = np.cov(descs_n, rowvar=False) + 1e-6 * np.eye(descs_n.shape[1])
+                    sig_inv_n = np.linalg.inv(sig_n)
+                    dists_n = [_maha(descs_n[i], mu_n, sig_inv_n) for i in range(len(descs_n))]
+                    curv_prior["mu"] = torch.from_numpy(mu_n).float()
+                    curv_prior["sigma_inv"] = sig_inv_n
+                    curv_prior["curv_min"] = float(min(dists_n))
+                    curv_prior["curv_max"] = float(max(dists_n))
+                    curv_prior["_norm_mean"] = nm
+                    curv_prior["_norm_std"] = ns
+                    print_fn(f"  [Curvature] Loaded + normalized: {curv_prior_path}")
+                else:
+                    curv_prior["sigma_inv"] = np.linalg.inv(curv_prior["sigma"].numpy())
+                    print_fn(f"  [Curvature] Loaded: {curv_prior_path}")
+            else:
+                print_fn(f"  [Curvature] Warning: not found: {curv_prior_path}, disabled")
+
+        # Curvature points bank 로드 (pixel_gating 전용)
+        curv_points_bank = None
+        if args.curv_fusion == "pixel_gating" and bank_dir_cat is not None:
+            pts_bank_path = os.path.join(bank_dir_cat, "SI-12_points_bank.pth")
+            if os.path.exists(pts_bank_path):
+                curv_points_bank = torch.load(pts_bank_path, map_location='cpu')
+                print_fn(f"  [Curvature] Points bank loaded: {pts_bank_path}")
+            else:
+                print_fn(f"  [Curvature] Warning: points bank not found: {pts_bank_path}")
+
         results = eval_3d(
             encoder           = encoder,
             raw_dataset       = raw_dataset,
@@ -843,6 +1053,13 @@ def main():
             use_concat_bank   = args.use_concat_bank,
             skip_cls_topk     = args.skip_cls_topk,
             unified_bank      = unified_bank,
+            curv_prior        = curv_prior,
+            curv_alpha        = args.curv_alpha,
+            curv_gamma        = args.curv_gamma,
+            curv_fusion       = args.curv_fusion,
+            curv_percentile   = args.curv_percentile,
+            curv_points_bank  = curv_points_bank,
+            curv_workers      = args.curv_workers,
         )
 
         auroc_sp, ap_sp, f1_sp, auroc_px, ap_px, f1_px, aupro_px = results

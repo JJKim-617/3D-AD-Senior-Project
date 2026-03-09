@@ -1,0 +1,60 @@
+device: cuda:0
+use_positional_bank=False  pos_radius=1
+color=rgb  k_image=48
+fpfh_alpha=0.0  voxel_size=0.05  use_concat_bank=False  skip_cls_topk=False
+unified_bank_path=None
+item_list=['bagel', 'cable_gland', 'carrot', 'cookie', 'dowel', 'foam', 'peach', 'potato', 'rope', 'tire']
+
+============================================================
+[Eval3D] Category: bagel
+MVTec3DRawDataset(category='bagel', phase='test', normal=22, anomaly=88)
+  [Curvature] Points bank loaded: ./bank_views/bagel/SI-12_points_bank.pth
+device: cuda:0
+use_positional_bank=False  pos_radius=1
+color=rgb  k_image=48
+fpfh_alpha=0.0  voxel_size=0.05  use_concat_bank=False  skip_cls_topk=False
+unified_bank_path=None
+item_list=['bagel', 'cable_gland', 'carrot', 'cookie', 'dowel', 'foam', 'peach', 'potato', 'rope', 'tire']
+
+============================================================
+[Eval3D] Category: bagel
+MVTec3DRawDataset(category='bagel', phase='test', normal=22, anomaly=88)
+  [Curvature] Points bank loaded: ./bank_views/bagel/SI-12_points_bank.pth
+device: cuda:0
+use_positional_bank=False  pos_radius=1
+color=rgb  k_image=48
+fpfh_alpha=0.0  voxel_size=0.05  use_concat_bank=False  skip_cls_topk=False
+unified_bank_path=None
+item_list=['bagel', 'cable_gland', 'carrot', 'cookie', 'dowel', 'foam', 'peach', 'potato', 'rope', 'tire']
+
+============================================================
+[Eval3D] Category: bagel
+MVTec3DRawDataset(category='bagel', phase='test', normal=22, anomaly=88)
+  [Curvature] Points bank loaded: ./bank_views/bagel/SI-12_points_bank.pth
+device: cuda:0
+use_positional_bank=False  pos_radius=1
+color=rgb  k_image=48
+fpfh_alpha=0.0  voxel_size=0.05  use_concat_bank=False  skip_cls_topk=False
+unified_bank_path=None
+item_list=['bagel', 'cable_gland', 'carrot', 'cookie', 'dowel', 'foam', 'peach', 'potato', 'rope', 'tire']
+
+============================================================
+[Eval3D] Category: bagel
+MVTec3DRawDataset(category='bagel', phase='test', normal=22, anomaly=88)
+  [Curvature] Points bank loaded: ./bank_views/bagel/SI-12_points_bank.pth
+device: cuda:0
+use_positional_bank=False  pos_radius=1
+color=rgb  k_image=48
+fpfh_alpha=0.0  voxel_size=0.05  use_concat_bank=False  skip_cls_topk=False
+unified_bank_path=None
+item_list=['bagel', 'cable_gland', 'carrot', 'cookie', 'dowel', 'foam', 'peach', 'potato', 'rope', 'tire']
+
+============================================================
+[Eval3D] Category: bagel
+MVTec3DRawDataset(category='bagel', phase='test', normal=22, anomaly=88)
+  [Curvature] Points bank loaded: ./bank_views/bagel/SI-12_points_bank.pth
+bagel: I-AUROC:0.4308, I-AP:0.7545, I-F1:0.8934, P-AUROC:0.8505, P-AP:0.0859, P-F1:0.1538, P-AUPRO:0.6372
+
+============================================================
+[Eval3D] Category: cable_gland
+MVTec3DRawDataset(category='cable_gland', phase='test', normal=21, anomaly=87)

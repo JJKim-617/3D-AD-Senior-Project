@@ -1,0 +1,79 @@
+device: cuda:0
+use_positional_bank=False  pos_radius=1
+color=rgb  k_image=48
+fpfh_alpha=0.0  voxel_size=0.05  use_concat_bank=False  skip_cls_topk=False
+unified_bank_path=None
+item_list=['bagel', 'cable_gland', 'carrot', 'cookie', 'dowel', 'foam', 'peach', 'potato', 'rope', 'tire']
+
+============================================================
+[Eval3D] Category: bagel
+MVTec3DRawDataset(category='bagel', phase='test', normal=22, anomaly=88)
+  [Curvature] Loaded: ./bank_views/bagel/SI-12_p90_bank.pth
+device: cuda:0
+use_positional_bank=False  pos_radius=1
+color=rgb  k_image=48
+fpfh_alpha=0.0  voxel_size=0.05  use_concat_bank=False  skip_cls_topk=False
+unified_bank_path=None
+item_list=['bagel', 'cable_gland', 'carrot', 'cookie', 'dowel', 'foam', 'peach', 'potato', 'rope', 'tire']
+
+============================================================
+[Eval3D] Category: bagel
+MVTec3DRawDataset(category='bagel', phase='test', normal=22, anomaly=88)
+  [Curvature] Loaded: ./bank_views/bagel/SI-12_p90_bank.pth
+bagel: I-AUROC:0.9799, I-AP:0.9949, I-F1:0.9663, P-AUROC:0.9954, P-AP:0.7598, P-F1:0.7080, P-AUPRO:0.9764
+
+============================================================
+[Eval3D] Category: cable_gland
+MVTec3DRawDataset(category='cable_gland', phase='test', normal=21, anomaly=87)
+  [Curvature] Loaded: ./bank_views/cable_gland/SI-12_p90_bank.pth
+cable_gland: I-AUROC:0.9907, I-AP:0.9980, I-F1:0.9885, P-AUROC:0.9969, P-AP:0.6366, P-F1:0.6415, P-AUPRO:0.9801
+
+============================================================
+[Eval3D] Category: carrot
+MVTec3DRawDataset(category='carrot', phase='test', normal=27, anomaly=132)
+  [Curvature] Loaded: ./bank_views/carrot/SI-12_p90_bank.pth
+carrot: I-AUROC:0.9840, I-AP:0.9968, I-F1:0.9695, P-AUROC:0.9983, P-AP:0.6092, P-F1:0.6126, P-AUPRO:0.9819
+
+============================================================
+[Eval3D] Category: cookie
+MVTec3DRawDataset(category='cookie', phase='test', normal=28, anomaly=103)
+  [Curvature] Loaded: ./bank_views/cookie/SI-12_p90_bank.pth
+cookie: I-AUROC:0.7982, I-AP:0.9467, I-F1:0.8841, P-AUROC:0.9782, P-AP:0.7189, P-F1:0.6755, P-AUPRO:0.9362
+
+============================================================
+[Eval3D] Category: dowel
+MVTec3DRawDataset(category='dowel', phase='test', normal=26, anomaly=104)
+  [Curvature] Loaded: ./bank_views/dowel/SI-12_p90_bank.pth
+dowel: I-AUROC:0.9689, I-AP:0.9925, I-F1:0.9662, P-AUROC:0.9971, P-AP:0.6422, P-F1:0.6118, P-AUPRO:0.9768
+
+============================================================
+[Eval3D] Category: foam
+MVTec3DRawDataset(category='foam', phase='test', normal=20, anomaly=80)
+  [Curvature] Loaded: ./bank_views/foam/SI-12_p90_bank.pth
+foam: I-AUROC:0.8675, I-AP:0.9680, I-F1:0.9012, P-AUROC:0.9454, P-AP:0.4397, P-F1:0.4683, P-AUPRO:0.8444
+
+============================================================
+[Eval3D] Category: peach
+MVTec3DRawDataset(category='peach', phase='test', normal=26, anomaly=106)
+  [Curvature] Loaded: ./bank_views/peach/SI-12_p90_bank.pth
+peach: I-AUROC:0.9895, I-AP:0.9975, I-F1:0.9811, P-AUROC:0.9987, P-AP:0.7969, P-F1:0.7323, P-AUPRO:0.9824
+
+============================================================
+[Eval3D] Category: potato
+MVTec3DRawDataset(category='potato', phase='test', normal=22, anomaly=92)
+  [Curvature] Loaded: ./bank_views/potato/SI-12_p90_bank.pth
+potato: I-AUROC:0.7475, I-AP:0.9311, I-F1:0.8990, P-AUROC:0.9976, P-AP:0.5846, P-F1:0.5633, P-AUPRO:0.9801
+
+============================================================
+[Eval3D] Category: rope
+MVTec3DRawDataset(category='rope', phase='test', normal=32, anomaly=69)
+  [Curvature] Loaded: ./bank_views/rope/SI-12_p90_bank.pth
+rope: I-AUROC:0.9932, I-AP:0.9971, I-F1:0.9781, P-AUROC:0.9954, P-AP:0.5886, P-F1:0.5864, P-AUPRO:0.9766
+
+============================================================
+[Eval3D] Category: tire
+MVTec3DRawDataset(category='tire', phase='test', normal=25, anomaly=87)
+  [Curvature] Loaded: ./bank_views/tire/SI-12_p90_bank.pth
+tire: I-AUROC:0.9209, I-AP:0.9791, I-F1:0.9111, P-AUROC:0.9968, P-AP:0.5843, P-F1:0.5578, P-AUPRO:0.9744
+
+Mean: I-AUROC:0.9240, I-AP:0.9802, I-F1:0.9445, P-AUROC:0.9900, P-AP:0.6361, P-F1:0.6157, P-AUPRO:0.9609
