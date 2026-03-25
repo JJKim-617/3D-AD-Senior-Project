@@ -211,6 +211,8 @@ Datasets/
 external/
 3d_extractor_JJ/RAD
 3d_extractor_JJ/pcd/results
+3d_extractor_JJ/depth/weight
+
 3d_extractor_ej
 framework_ej
 .claude/
